@@ -61,6 +61,20 @@ def split_bunsetsu(text):
         sub.append(seg[last:])
         relaxed += [x for x in sub if x]
     out = relaxed
+    # 3.5) 中黒でつないだ長い並列語は中黒の直後でも切る（中黒は前に残す＝行頭に出さない）
+    dotted = []
+    for seg in out:
+        if len(seg) <= LIMIT or '・' not in seg:
+            dotted.append(seg); continue
+        pieces, last = [], 0
+        for m in re.finditer('・', seg):
+            end = m.end()
+            if end >= len(seg) or end - last < 3:
+                continue
+            pieces.append(seg[last:end]); last = end
+        pieces.append(seg[last:])
+        dotted += [x for x in pieces if x]
+    out = dotted
     # 4) 1文字の断片は前にくっつける
     merged = []
     for s in out:
