@@ -1,85 +1,95 @@
 # -*- coding: utf-8 -*-
-"""日本語を文節っぽい単位に切る（形態素解析なし・切らない側に倒す）"""
-import re
+"""日本語を文節に切る（BudouX ＋ 後処理）2026年10月3日
 
-KANJI = r'一-鿿々'
-KATA  = r'ァ-ヶー'
-# 助詞の直前に来てよい文字。ひらがなが続く途中では切らない（「ひとつ」の「と」対策）
-PREV  = rf'[{KANJI}{KATA}0-9A-Za-z）」』】]'
-JOSHI = r'(?:により|による|によって|として|について|に対して|からは|までは|には|へは|とは|では|から|まで|より|など|ほど|だけ|こそ|しか|[がをにへとはもでやかの])'
-# 助詞の直後がこれらで始まるときは動詞・補助用言が続くとみなして切らない
-NOCUT = ('される','されて','され','した','して','しま','する','すれ','しれ',
-         'なる','なっ','なり','なろ','ない','なく','いう','いく','いる','いた',
-         'おり','おい','よる','より','あり','ある','きる','つい','対し','関し','向け','言',
-         'す','し','せ','そう','き','く','け')  # 「大丈夫で|すか？」のような助動詞の切断を防ぐ
-CLOSERS = '」』）】"\''
-PUNCT = '、。！？'
-FOLLOW_NG = 'のはもがをにへとでやか'  # 切った直後がこの助詞なら切らない（「家族と|の接点へ」を防ぐ）
+REALIZE OS 採用LP 3本（careers / 100years / future-careers）で共通。
+BudouX（Google製・pip install budoux）で切ったあと、誤りやすい所を直す。
+- 「万が|一」「と|いう」のように語の内側で切れたものを結合する
+- 1文字だけの断片や、閉じカッコ・句読点で始まる断片は前に結合する
+- 長すぎる断片は「 / 」・中黒・開きカッコで割る（スマホで1つの塊が収まらないため）
+"""
+import re
+import budoux
+
+_parser = budoux.load_default_japanese_parser()
+
+# この語の内側では切らない
+KEEP_WORDS = ('万が一', '手がかり', 'という', 'といった', 'とともに', 'として', 'ひとつなぎ', '一人ひとり',
+              'ひとつひとつ', '一つひとつ', 'かもしれません', 'かもしれない', 'ではありません',
+              '子どもたち', '私たち', '自分たち',
+              'REALIZE OS', 'REALIZEOS', 'LIFE JOURNEY', 'LIFE Record', 'みお先生', 'AIみお先生',
+              'OSMA', 'LINE運用', '100年後', '10秒')
+HEAD_NG = '、。，．！？」』）】・ー々ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮ'
+LONG = 12
+
+
+def _cuts_inside(text, pos):
+    for w in KEEP_WORDS:
+        start = 0
+        while True:
+            i = text.find(w, start)
+            if i < 0:
+                break
+            if i < pos < i + len(w):
+                return True
+            start = i + 1
+    return False
+
+
+def _split_long(s):
+    """長い断片を「 / 」→ 開きカッコの前 → 中黒の後 の順で割る"""
+    if len(s) <= LONG:
+        return [s]
+    if ' / ' in s or '／' in s:
+        parts = re.split(r'(?<=[/／] )|(?<=／)', s)
+        parts = [p for p in parts if p]
+        if len(parts) > 1:
+            return [q for p in parts for q in _split_long(p)]
+    i = max(s.find('『'), s.find('「'))
+    if i >= 2:
+        return _split_long(s[:i]) + _split_long(s[i:])
+    if '・' in s[:-1]:
+        out, buf = [], ''
+        for ch in s:
+            buf += ch
+            if ch == '・' and len(buf) >= 4:
+                out.append(buf); buf = ''
+        if buf:
+            if len(buf) <= 2 and out:
+                out[-1] += buf
+            else:
+                out.append(buf)
+        if len(out) > 1:
+            return out
+    return [s]
+
 
 def split_bunsetsu(text):
-    # 1) 句読点の後で切る（続く閉じ括弧は前に含める）
-    parts, buf, i = [], '', 0
-    while i < len(text):
-        ch = text[i]; buf += ch; i += 1
-        if ch in PUNCT:
-            while i < len(text) and text[i] in CLOSERS:
-                buf += text[i]; i += 1
-            parts.append(buf); buf = ''
-    if buf:
-        parts.append(buf)
-    # 2) 助詞の後で切る
-    out = []
-    for p in parts:
-        segs, last = [], 0
-        for m in re.finditer(rf'(?<={PREV}){JOSHI}', p):
-            end = m.end()
-            if end >= len(p) or p[end] in PUNCT or p[end] in CLOSERS:
-                continue
-            if p[end:].startswith(NOCUT) or p[end] in FOLLOW_NG:
-                continue
-            segs.append(p[last:end]); last = end
-        segs.append(p[last:])
-        out += [s for s in segs if s]
-    # 3) 長すぎる文節は、ひらがなの直後でも切る緩いルールで割り直す
-    LIMIT = 10
-    relaxed = []
-    for seg in out:
-        if len(seg) <= LIMIT:
-            relaxed.append(seg); continue
-        sub, last = [], 0
-        for m in re.finditer(JOSHI, seg):
-            end = m.end()
-            if end >= len(seg) or seg[end] in PUNCT or seg[end] in CLOSERS:
-                continue
-            if seg[end:].startswith(NOCUT) or seg[end] in FOLLOW_NG:
-                continue
-            if m.group(0) in 'かや':   # 「するか」「AやB」は単独で切ると不自然
-                continue
-            if end - last < 3:        # 細かく刻みすぎない
-                continue
-            sub.append(seg[last:end]); last = end
-        sub.append(seg[last:])
-        relaxed += [x for x in sub if x]
-    out = relaxed
-    # 3.5) 中黒でつないだ長い並列語は中黒の直後でも切る（中黒は前に残す＝行頭に出さない）
-    dotted = []
-    for seg in out:
-        if len(seg) <= LIMIT or '・' not in seg:
-            dotted.append(seg); continue
-        pieces, last = [], 0
-        for m in re.finditer('・', seg):
-            end = m.end()
-            if end >= len(seg) or end - last < 3:
-                continue
-            pieces.append(seg[last:end]); last = end
-        pieces.append(seg[last:])
-        dotted += [x for x in pieces if x]
-    out = dotted
-    # 4) 1文字の断片は前にくっつける
-    merged = []
-    for s in out:
-        if merged and len(s.strip()) <= 1:
-            merged[-1] += s
+    segs = _parser.parse(text)
+    out, pos = [], 0
+    for s in segs:
+        if out and (_cuts_inside(text, pos) or s[0] in HEAD_NG or len(s.strip()) <= 1):
+            out[-1] += s
         else:
-            merged.append(s)
-    return merged
+            out.append(s)
+        pos += len(s)
+    # 先頭が1文字だけ（要素の直後の「が|ある。」）なら次に結合する
+    if len(out) > 1 and len(out[0].strip()) <= 1:
+        out[1] = out[0] + out[1]
+        out = out[1:]
+    final = []
+    for s in out:
+        final += _split_long(s)
+    # 1文字・禁則文字で始まる断片が割り直しで出たら前へ
+    res = []
+    for s in final:
+        if res and (s[0] in HEAD_NG or len(s.strip()) <= 1):
+            res[-1] += s
+        else:
+            res.append(s)
+    return res
+
+
+if __name__ == '__main__':
+    import sys
+    for t in sys.argv[1:]:
+        print('|'.join(split_bunsetsu(t)))
